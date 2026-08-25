@@ -1,0 +1,29 @@
+---
+# NNCP for HPE ProLiant DL380 Gen10
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: ovs-bridge-hpe-dl380-gen10
+spec:
+  nodeSelector:
+    feature.node.kubernetes.io/nic-profile: hpe-dl380-gen10
+  desiredState:
+    interfaces:
+      - name: uplink0
+        type: ethernet
+        state: up
+        identifier: pci-address
+        pci-address: "0000:03:00.0"    # <-- replace with actual PCI addr from your DL380
+
+      - name: br-ex
+        type: ovs-bridge
+        state: up
+        bridge:
+          options:
+            stp: false
+          port:
+            - name: uplink0
+            - name: br-ex
+    ovs-db:
+      external_ids:
+        ovn-bridge-mappings: "physnet:br-ex"

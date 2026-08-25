@@ -1,0 +1,60 @@
+---
+# NodeFeatureRules - Create custom labels based on server model (DMI) + NIC (PCI)
+# Deploy NFD Operator on each managed cluster first
+#
+# These rules combine vendor + product_name into a single "nic-profile" label
+# that NNCPs can use as a nodeSelector.
+#
+# Verify DMI values on your hardware:
+#   cat /sys/devices/virtual/dmi/id/sys_vendor
+#   cat /sys/devices/virtual/dmi/id/product_name
+#
+# Verify PCI address of your target NIC:
+#   ethtool -i <interface_name> | grep bus-info
+
+apiVersion: nfd.k8s-sigs.io/v1alpha1
+kind: NodeFeatureRule
+metadata:
+  name: nic-profile-dell-r640
+spec:
+  rules:
+    - name: "dell-poweredge-r640"
+      labels:
+        "nic-profile": "dell-r640"
+      matchFeatures:
+        - feature: system.dmiid
+          matchExpressions:
+            sys_vendor: {op: In, value: ["Dell Inc."]}
+            product_name: {op: InRegexp, value: ["^PowerEdge R640$"]}
+
+---
+apiVersion: nfd.k8s-sigs.io/v1alpha1
+kind: NodeFeatureRule
+metadata:
+  name: nic-profile-dell-r650
+spec:
+  rules:
+    - name: "dell-poweredge-r650"
+      labels:
+        "nic-profile": "dell-r650"
+      matchFeatures:
+        - feature: system.dmiid
+          matchExpressions:
+            sys_vendor: {op: In, value: ["Dell Inc."]}
+            product_name: {op: InRegexp, value: ["^PowerEdge R650.*"]}
+
+---
+apiVersion: nfd.k8s-sigs.io/v1alpha1
+kind: NodeFeatureRule
+metadata:
+  name: nic-profile-hpe-dl380-gen10
+spec:
+  rules:
+    - name: "hpe-dl380-gen10"
+      labels:
+        "nic-profile": "hpe-dl380-gen10"
+      matchFeatures:
+        - feature: system.dmiid
+          matchExpressions:
+            sys_vendor: {op: In, value: ["HPE"]}
+            product_name: {op: InRegexp, value: ["ProLiant DL380 Gen10.*"]}
