@@ -56,6 +56,7 @@ Since nodes of the same server model share the same PCI topology, you get one NN
 | `02-nncp-dell-r650.yaml` | Standalone NNCP for Dell PowerEdge R650 |
 | `02-nncp-hpe-dl380-gen10.yaml` | Standalone NNCP for HPE ProLiant DL380 Gen10 |
 | `03-acm-policy.yaml` | Full ACM policy set wrapping all of the above |
+| `get-nic-pci-redfish.sh` | Helper script to discover NIC PCI addresses via Redfish API |
 
 The `01-*` and `02-*` files can be applied directly to a single cluster for testing. The `03-acm-policy.yaml` wraps everything for fleet-wide deployment via ACM.
 
@@ -69,6 +70,8 @@ The `01-*` and `02-*` files can be applied directly to a single cluster for test
 
 ### 1. Discover PCI Addresses Per Server Model
 
+#### Option A: From a Running Node (OS-Level)
+
 On one representative node of each server model, find the PCI address of the NIC you want in the OVS bridge:
 
 ```bash
@@ -81,6 +84,105 @@ ethtool -i eno1 | grep bus-info
 
 # Or list all NICs with their PCI addresses
 ls -l /sys/class/net/*/device | awk -F'/' '{print $(NF-1), $NF}'
+```
+
+#### Option B: Via Redfish API (BMC — No OS Required)
+
+You can retrieve NIC PCI addresses remotely from the server's BMC (iDRAC, iLO) using the Redfish API. This is useful when you need to plan NNCPs before the OS is installed, or for automating discovery across a fleet.
+
+**Dell iDRAC:**
+
+```bash
+BMC_HOST="idrac-hostname-or-ip"
+BMC_USER="root"
+BMC_PASS="password"
+
+# List all network adapters
+curl -sk -u "${BMC_USER}:${BMC_PASS}" \
+  "https://${BMC_HOST}/redfish/v1/Systems/System.Embedded.1/NetworkAdapters" \
+  | jq '.Members[]."@odata.id"'
+
+# Get details for a specific adapter (e.g., NIC.Integrated.1)
+curl -sk -u "${BMC_USER}:${BMC_PASS}" \
+  "https://${BMC_HOST}/redfish/v1/Systems/System.Embedded.1/NetworkAdapters/NIC.Integrated.1" \
+  | jq '.Controllers[] | {Location: .Location, PCIeInterface: .PCIeInterface}'
+
+# List PCIe functions with bus/device/function numbers for all NICs
+curl -sk -u "${BMC_USER}:${BMC_PASS}" \
+  "https://${BMC_HOST}/redfish/v1/Systems/System.Embedded.1/NetworkAdapters/NIC.Integrated.1/NetworkDeviceFunctions" \
+  | jq '.Members[]."@odata.id"' \
+  | xargs -I{} curl -sk -u "${BMC_USER}:${BMC_PASS}" "https://${BMC_HOST}{}" \
+  | jq '{Id: .Id, Ethernet: .Ethernet.MACAddress, PCIe: .Oem.Dell.DellNetworkAttributes.BusNumber}'
+
+# Alternative: use PCIeDevices/PCIeFunctions for exact BDF
+curl -sk -u "${BMC_USER}:${BMC_PASS}" \
+  "https://${BMC_HOST}/redfish/v1/Systems/System.Embedded.1/PCIeDevices" \
+  | jq '.Members[]."@odata.id"' \
+  | xargs -I{} curl -sk -u "${BMC_USER}:${BMC_PASS}" "https://${BMC_HOST}{}" \
+  | jq 'select(.DeviceType == "SingleFunction" or .DeviceType == "MultiFunction") | {Name, Id}'
+
+# Get the PCI Bus:Device.Function from a PCIe function resource
+curl -sk -u "${BMC_USER}:${BMC_PASS}" \
+  "https://${BMC_HOST}/redfish/v1/Systems/System.Embedded.1/PCIeDevices/NIC.Integrated.1-1/PCIeFunctions/NIC.Integrated.1-1-1" \
+  | jq '{FunctionId: .FunctionId, BusNumber: .PciSegmentId, DeviceClass: .DeviceClass}'
+```
+
+**HPE iLO:**
+
+```bash
+BMC_HOST="ilo-hostname-or-ip"
+BMC_USER="Administrator"
+BMC_PASS="password"
+
+# List all network adapters
+curl -sk -u "${BMC_USER}:${BMC_PASS}" \
+  "https://${BMC_HOST}/redfish/v1/Systems/1/NetworkAdapters" \
+  | jq '.Members[]."@odata.id"'
+
+# Get adapter details including PCI location
+curl -sk -u "${BMC_USER}:${BMC_PASS}" \
+  "https://${BMC_HOST}/redfish/v1/Systems/1/NetworkAdapters/DE07A000" \
+  | jq '.Controllers[] | {Location: .Location, PCIeInterface: .PCIeInterface}'
+
+# List PCIe devices and filter for network controllers
+curl -sk -u "${BMC_USER}:${BMC_PASS}" \
+  "https://${BMC_HOST}/redfish/v1/Systems/1/PCIeDevices" \
+  | jq '.Members[]."@odata.id"' \
+  | xargs -I{} curl -sk -u "${BMC_USER}:${BMC_PASS}" "https://${BMC_HOST}{}" \
+  | jq 'select(.Name | test("Network|Ethernet"; "i")) | {Name, Id}'
+
+# Get the exact PCI BDF (Bus:Device.Function) numbers
+# Replace the device ID with ones found above
+curl -sk -u "${BMC_USER}:${BMC_PASS}" \
+  "https://${BMC_HOST}/redfish/v1/Systems/1/PCIeDevices/1/PCIeFunctions/1" \
+  | jq '{DeviceClass, BusNumber, DeviceNumber, FunctionNumber, SegmentNumber}'
+```
+
+**Converting Redfish PCIe numbers to PCI address format:**
+
+The Redfish API returns decimal values for `BusNumber`, `DeviceNumber`, `FunctionNumber`, and `SegmentNumber`. Convert them to the `SSSS:BB:DD.F` hex format used in NNCPs:
+
+```bash
+# Example: SegmentNumber=0, BusNumber=24, DeviceNumber=0, FunctionNumber=0
+printf "%04x:%02x:%02x.%x\n" 0 24 0 0
+# Output: 0000:18:00.0
+```
+
+A helper script `get-nic-pci-redfish.sh` is provided in this directory to automate this discovery. See the script for usage details.
+
+**Redfish API response structure:**
+
+The key Redfish resources for NIC PCI discovery:
+```
+/redfish/v1/Systems/{SystemId}/
+├── NetworkAdapters/                     # High-level NIC inventory
+│   └── {AdapterId}/
+│       ├── Controllers[].PCIeInterface  # PCIe link details
+│       └── NetworkDeviceFunctions/      # Per-port details (MAC, etc.)
+└── PCIeDevices/                         # All PCIe devices
+    └── {DeviceId}/
+        └── PCIeFunctions/               # BusNumber, DeviceNumber,
+            └── {FunctionId}             # FunctionNumber, SegmentNumber
 ```
 
 ### 2. Verify DMI Values
@@ -137,11 +239,15 @@ oc debug node/<node-name> -- chroot /host ovs-vsctl show
 
 ## Adding a New Server Model
 
-1. **Get hardware info** from a sample node:
+1. **Get hardware info** from a sample node (OS-level or via Redfish):
    ```bash
+   # Option A: From a running node
    cat /sys/devices/virtual/dmi/id/sys_vendor
    cat /sys/devices/virtual/dmi/id/product_name
    ethtool -i <interface> | grep bus-info
+
+   # Option B: Via Redfish (no OS required)
+   ./get-nic-pci-redfish.sh <bmc-host> <user> <password>
    ```
 
 2. **Add a NodeFeatureRule** entry in `03-acm-policy.yaml` under `policy-nfd-nic-profile-rules`:
